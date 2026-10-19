@@ -1,0 +1,66 @@
+# Configuración de las herramientas del proyecto.
+# Las bibliotecas y sus versiones exactas están en requirements.txt.
+
+[project]
+name = "calculadora"
+version = "1.0.0"
+description = "Calculadora en Python con pruebas automáticas, API y análisis en SonarQube."
+readme = "README.md"
+requires-python = ">=3.12"
+
+# --- pytest ---
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["pruebas"]
+# Permite que las pruebas importen calculadora y api desde la raíz del proyecto.
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
+
+# --- Cobertura (pytest-cov) ---
+[tool.coverage.run]
+# Rutas relativas en coverage.xml para que SonarQube las relacione con sus archivos.
+relative_files = true
+branch = true
+source = ["."]
+omit = [
+    "pruebas/*",
+    ".venv/*",
+]
+
+[tool.coverage.report]
+# Cobertura combinada de líneas y ramas.
+fail_under = 90
+show_missing = true
+skip_empty = true
+exclude_also = [
+    'if __name__ == "__main__":',
+]
+
+[tool.coverage.xml]
+# Archivo que importa SonarQube.
+output = "coverage.xml"
+
+# --- Ruff: revisión y formato del código ---
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["material"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # errores de estilo
+    "W",   # advertencias de estilo
+    "F",   # errores lógicos: importaciones o variables sin uso
+    "I",   # orden de las importaciones
+    "B",   # errores comunes
+    "UP",  # sintaxis moderna de Python
+    "SIM", # simplificaciones
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --- Bandit: seguridad estática ---
+# Se usa con: bandit -c pyproject.toml -r .
+[tool.bandit]
+exclude_dirs = [".venv", "pruebas"]

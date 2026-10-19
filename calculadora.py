@@ -1,5 +1,7 @@
 """Calculadora con programación orientada a objetos."""
 
+import math
+
 OPERACIONES = {
     "1": "suma",
     "2": "resta",
@@ -22,7 +24,24 @@ class Calculadora:
     """Guarda la operación y los números, y concentra todos los cálculos."""
 
     def __init__(self, operacion, numeros):
-        # Constructor: los datos quedan como atributos del objeto.
+        # Constructor: valida los datos y los guarda como atributos del objeto.
+        if operacion not in OPERACIONES.values():
+            raise ValueError("Operación no válida.")
+        if not isinstance(numeros, (list, tuple)) or not numeros:
+            raise ValueError("Envía una lista con al menos un número.")
+        for numero in numeros:
+            # bool es un tipo de int, pero True y False no son números para la calculadora.
+            if isinstance(numero, bool) or not isinstance(numero, (int, float)):
+                raise ValueError("Todos los valores deben ser números.")
+        if operacion in OPERACIONES_BINARIAS and len(numeros) != 2:
+            raise ValueError(f"La operación {operacion} necesita exactamente dos números.")
+        # Trabajar con float evita calcular enteros gigantes, por ejemplo en la potencia.
+        try:
+            numeros = [float(numero) for numero in numeros]
+        except OverflowError as error:
+            raise ValueError("Un número es demasiado grande.") from error
+        if not all(math.isfinite(numero) for numero in numeros):
+            raise ValueError("Los números no pueden ser infinitos ni NaN.")
         self.operacion = operacion
         self.numeros = numeros
 
@@ -41,14 +60,19 @@ class Calculadora:
     def division(self):
         # La clase también protege la división, aunque el menú ya la valide.
         if self.numeros[1] == 0:
-            raise ZeroDivisionError("No se puede dividir entre cero.")
+            raise ValueError("No se puede dividir entre cero.")
         return self.numeros[0] / self.numeros[1]
 
     def promedio(self):
         return sum(self.numeros) / len(self.numeros)
 
     def potencia(self):
-        resultado = self.numeros[0] ** self.numeros[1]
+        if self.numeros[0] == 0 and self.numeros[1] < 0:
+            raise ValueError("Cero no se puede elevar a una potencia negativa.")
+        try:
+            resultado = self.numeros[0] ** self.numeros[1]
+        except OverflowError as error:
+            raise OverflowError("El resultado es demasiado grande.") from error
         # Base negativa con exponente decimal produce un número complejo.
         if isinstance(resultado, complex):
             raise ValueError("La potencia no tiene resultado real con esos valores.")
@@ -68,9 +92,11 @@ class Calculadora:
             "potencia": self.potencia,
             "mayor_menor": self.mayor_menor,
         }
-        if self.operacion not in metodos:
-            raise ValueError("Operación no válida.")
-        return metodos[self.operacion]()
+        respuesta = metodos[self.operacion]()
+        # Un resultado infinito o NaN indica que el cálculo no cabe en un float.
+        if isinstance(respuesta, float) and not math.isfinite(respuesta):
+            raise OverflowError("El resultado es demasiado grande.")
+        return respuesta
 
 
 def formatear(valor):
@@ -85,16 +111,21 @@ def pedir_numero(mensaje):
     while True:
         texto = input(mensaje).strip()
         try:
-            return float(texto)
+            numero = float(texto)
         except ValueError:
-            print("Valor no válido. Escribe un número, por ejemplo 8 o 2.5.")
+            numero = math.nan
+        # float() también acepta "inf" y "nan", que no sirven para calcular.
+        if math.isfinite(numero):
+            return numero
+        print("Valor no válido. Escribe un número, por ejemplo 8 o 2.5.")
 
 
 def pedir_cantidad():
     # Las operaciones con listas necesitan al menos un número.
     while True:
         texto = input("Cantidad de números: ").strip()
-        if texto.isdigit() and int(texto) >= 1:
+        # isdecimal() rechaza símbolos como "²" que isdigit() acepta pero int() no convierte.
+        if texto.isdecimal() and int(texto) >= 1:
             return int(texto)
         print("Cantidad no válida. Escribe un entero mayor o igual a 1.")
 
@@ -140,11 +171,11 @@ def main():
         print(f"Operación: {operacion}")
         numeros = capturar_numeros(operacion)
 
-        calculadora = Calculadora(operacion, numeros)  # Creación del objeto.
         try:
+            calculadora = Calculadora(operacion, numeros)  # Creación del objeto.
             respuesta = calculadora.resultado()
             print(f"Resultado: {formatear(respuesta)}")
-        except (ZeroDivisionError, OverflowError, ValueError) as error:
+        except (OverflowError, ValueError) as error:
             print(f"Error: {error}")
 
         otra = input("¿Deseas realizar otra operación? (s/n): ").strip().lower()

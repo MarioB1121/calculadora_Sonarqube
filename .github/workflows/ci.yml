@@ -1,0 +1,429 @@
+name: Calidad y seguridad
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Una ejecución nueva de un PR cancela la anterior; en main todas terminan.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.14"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # La dirección del servidor no es secreta; solo SONAR_TOKEN se guarda como secreto.
+  SONAR_HOST_URL: https://sonarqube.lynvera.ai
+
+jobs:
+  revision:
+    name: Revisión del código
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      - name: Revisar el código con Ruff
+        run: python -m ruff check --output-format=github .
+      - name: Revisar el formato con Ruff
+        run: python -m ruff format --check --diff .
+
+  unitarias:
+    name: Pruebas unitarias
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      # Todas las pruebas excepto las de integración: calculadora y reportes.
+      - name: Ejecutar pruebas unitarias
+        run: python -m pytest --ignore=pruebas/test_integracion.py -v
+
+  integracion:
+    name: Pruebas de integración
+    needs:
+      - unitarias
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      - name: Probar el menú y la API
+        run: python -m pytest pruebas/test_integracion.py -v
+
+  cobertura:
+    name: Cobertura del proyecto
+    needs:
+      - unitarias
+      - integracion
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      # El mínimo de 90 % está en pyproject.toml; si no se alcanza, el job falla.
+      - name: Ejecutar todas las pruebas con cobertura
+        run: >-
+          python -m pytest --cov --cov-report=term-missing --cov-report=xml
+          --junitxml=reports/junit.xml
+      - name: Guardar los resultados de cobertura
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cobertura
+          path: |
+            coverage.xml
+            reports/junit.xml
+          if-no-files-found: error
+
+  secretos:
+    name: Contraseñas y secretos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Gitleaks revisa todo el historial, no solo el último commit.
+          persist-credentials: false
+      - name: Instalar Gitleaks
+        run: |
+          cd "$RUNNER_TEMP"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archivo="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "$url/$archivo"
+          curl -fsSLO "$url/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          # Comprueba que el archivo descargado es el publicado por Gitleaks.
+          sha256sum --check --ignore-missing "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          tar -xzf "$archivo" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Buscar credenciales en el historial
+        run: |
+          mkdir -p reports
+          gitleaks git --redact --verbose \
+            --report-format sarif --report-path reports/gitleaks.sarif .
+      - name: Guardar el reporte de Gitleaks
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gitleaks
+          path: reports/gitleaks.sarif
+          if-no-files-found: warn
+
+  seguridad:
+    name: Seguridad estática
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      # Las carpetas excluidas (.venv y pruebas) están en pyproject.toml.
+      - name: Analizar el código con Bandit
+        run: python -m bandit -c pyproject.toml -r .
+
+  dependencias:
+    name: Vulnerabilidades de dependencias
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      # Revisa las bibliotecas de requirements.txt y las que estas instalan.
+      - name: Auditar dependencias con pip-audit
+        run: python -m pip_audit --requirement requirements.txt --strict --desc on
+
+  obsoletas:
+    name: Dependencias obsoletas
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      # Es informativo: encontrar versiones nuevas no hace fallar el job,
+      # pero un error al consultar pip sí lo hace.
+      - name: Listar bibliotecas con versiones más recientes
+        run: |
+          mkdir -p reports
+          python -m pip list --outdated --format=json > reports/obsoletas.json
+          {
+            echo "## Dependencias obsoletas"
+            echo
+            if [ "$(jq length reports/obsoletas.json)" -eq 0 ]; then
+              echo "Todas las bibliotecas están en su versión más reciente."
+            else
+              echo "| Biblioteca | Instalada | Disponible |"
+              echo "| --- | --- | --- |"
+              jq -r '.[] | "| \(.name) | \(.version) | \(.latest_version) |"' reports/obsoletas.json
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Guardar la lista
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: obsoletas
+          path: reports/obsoletas.json
+
+  zap:
+    name: OWASP ZAP
+    needs:
+      - integracion
+      - secretos
+      - seguridad
+      - dependencias
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ZAP_IMAGEN: ghcr.io/zaproxy/zaproxy:2.17.0
+      API_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      # La API solo existe dentro del runner mientras dura este job.
+      - name: Iniciar la API temporal
+        run: |
+          mkdir -p reports/zap
+          python -m uvicorn api:aplicacion --host 127.0.0.1 --port 8000 --no-server-header \
+            > reports/zap/api.log 2>&1 &
+          for intento in $(seq 1 30); do
+            if curl -fsS "$API_URL/estado"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "La API no respondió a tiempo."
+          cat reports/zap/api.log
+          exit 1
+      # -I evita que ZAP decida por su cuenta; el paso siguiente aplica el criterio del proyecto.
+      - name: Revisar la API con ZAP
+        run: |
+          chmod a+rwx reports/zap
+          docker run --rm --network host --volume "$PWD/reports/zap:/zap/wrk:rw" "$ZAP_IMAGEN" \
+            zap-api-scan.py -t "$API_URL/openapi.json" -f openapi -I \
+            -r zap.html -J zap.json -w zap.md
+      # Cualquier aviso de riesgo bajo, medio o alto hace fallar el job.
+      # Los avisos informativos solo se muestran en el resumen.
+      - name: Comprobar los avisos
+        run: |
+          alertas='(.site | if type == "array" then .[] else . end) | .alerts[]?'
+          {
+            echo "## OWASP ZAP"
+            echo
+            echo "| Riesgo | Aviso | Casos |"
+            echo "| --- | --- | --- |"
+            jq -r "$alertas | \"| \(.riskdesc) | \(.alert) | \(.count) |\"" reports/zap/zap.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          avisos=$(jq "[$alertas | select((.riskcode | tonumber) >= 1)] | length" reports/zap/zap.json)
+          if [ "$avisos" -gt 0 ]; then
+            echo "ZAP encontró $avisos avisos de riesgo bajo o mayor."
+            exit 1
+          fi
+      - name: Guardar el reporte de ZAP
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zap
+          path: reports/zap/
+          if-no-files-found: warn
+
+  sonarqube:
+    name: Análisis SonarQube con cobertura
+    needs:
+      - cobertura
+      - revision
+      - secretos
+      - seguridad
+      - dependencias
+    # El servidor Community solo analiza main; en los PR este job aparece omitido.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # SonarQube usa el historial para identificar el código nuevo.
+          persist-credentials: false
+      - name: Validar acceso y configuración
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::Configura el secreto SONAR_TOKEN antes de ejecutar SonarQube."
+            exit 1
+          fi
+          curl --fail --silent --show-error --retry 3 "$SONAR_HOST_URL/api/system/status"
+      - name: Descargar los resultados de cobertura
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cobertura
+          path: .
+      # La configuración del análisis está en sonar-project.properties.
+      - name: Analizar con SonarQube
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      # report-task.txt identifica este análisis; el job reporte lo usa para consultar su resultado.
+      - name: Guardar la referencia del análisis
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonarqube-tarea
+          path: .scannerwork/report-task.txt
+          include-hidden-files: true
+          if-no-files-found: error
+
+  reporte:
+    name: Reporte y Quality Gate
+    needs:
+      - sonarqube
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar bibliotecas
+        run: python -m pip install -r requirements.txt
+      - name: Descargar la referencia del análisis
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sonarqube-tarea
+          path: .scannerwork
+      # Genera sonarqube.json, .md y .pdf, y falla si el Quality Gate no aprueba.
+      - name: Descargar el análisis y evaluar el Quality Gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: python -m herramientas.reporte_sonarqube
+      # if: always() conserva el reporte aunque el Quality Gate falle.
+      - name: Guardar el reporte
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sonarqube-report-pdf-json-md
+          path: reports/sonarqube/
+          if-no-files-found: error
+          retention-days: 30
+
+  resumen:
+    name: Resumen final
+    needs:
+      - revision
+      - unitarias
+      - integracion
+      - cobertura
+      - secretos
+      - seguridad
+      - dependencias
+      - obsoletas
+      - zap
+      - sonarqube
+      - reporte
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Revisar el resultado de cada job
+        env:
+          RESULTADOS: ${{ toJSON(needs) }}
+          ES_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          {
+            echo "## Resumen de Calidad y seguridad"
+            echo
+            echo "| Job | Resultado |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          aprobado=true
+          for job in $(jq -r 'keys_unsorted[]' <<< "$RESULTADOS"); do
+            resultado=$(jq -r --arg job "$job" '.[$job].result' <<< "$RESULTADOS")
+            if [ "$resultado" = "success" ]; then
+              :
+            # Fuera de main, la omisión de sonarqube y reporte es esperada.
+            elif [ "$resultado" = "skipped" ] && [ "$ES_MAIN" != "true" ] \
+              && { [ "$job" = "sonarqube" ] || [ "$job" = "reporte" ]; }; then
+              resultado="skipped (solo se analiza main)"
+            else
+              aprobado=false
+            fi
+            echo "| $job | $resultado |" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "$aprobado" != "true" ]; then
+            echo "La ejecución no fue aprobada. Revisa el primer job con fallo." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Todos los controles aprobaron." | tee -a "$GITHUB_STEP_SUMMARY"
